@@ -6,7 +6,7 @@
 int main(int argc, char *argv[]) {
     struct sockaddr_in serverInfo = {0};
     struct sockaddr_in clientInfo = {0};
-    int clientSize = 0;
+    socklen_t clientSize = 0;
 
     serverInfo.sin_family = AF_INET;
     serverInfo.sin_addr.s_addr = 0;
