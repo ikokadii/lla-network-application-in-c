@@ -20,7 +20,7 @@ typedef enum {
 typedef struct {
   int fd;
   state_e state;
-  char buffer[BUFF_SIZE];
+  char buffer[4096];
 } clientstate_t;
 
 clientstate_t clientStates[MAX_CLIENTS];
@@ -105,57 +105,56 @@ int main(int argc, char *argv[]) {
         fds[ii].events = POLLIN;
         ii++; 
       }
+    }
 
-      int n_events = poll(fds, nfds, -1); //no_timeout
-      if (n_events == -1) {
-        perror("poll");
-        exit(EXIT_FAILURE);
+    int n_events = poll(fds, nfds, -1); //no_timeout
+    if (n_events == -1) {
+      perror("poll");
+      exit(EXIT_FAILURE);
+    }
+
+    if (fds[0].revents & POLLIN) {
+      if ((conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len)) == -1) {
+        perror("accept");
+        continue;
       }
 
-      if (fds[0].revents & POLLIN) {
-        if ((conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len)) == -1) {
-          perror("accept");
-          continue;
-        }
+      printf("New connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
-        printf("New connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+      freeSlot = find_free_slot();
+      if (freeSlot == -1) {
+        printf("Server full: closing new connection\n");
+        close(conn_fd);
+      } else { 
+        clientStates[freeSlot].fd = conn_fd;
+        clientStates[freeSlot].state = STATE_CONNECTED;
+        nfds++;
+        printf("Slot %d has fd %d\n", freeSlot, clientStates[freeSlot].fd);
+      }
 
-        freeSlot = find_free_slot();
-        if (freeSlot == -1) {
-          printf("Server full: closing new connection\n");
-          close(conn_fd);
-        } else { 
-          clientStates[freeSlot].fd = conn_fd;
-          clientStates[freeSlot].state = STATE_CONNECTED;
-          nfds++;
-          printf("Slot %d has fd %d\n", freeSlot, clientStates[freeSlot].fd);
-        }
+      n_events--;
+    }
 
+    for (int i = 1; i <= nfds && n_events > 0; i++) {
+      if (fds[i].revents & POLLIN) {
         n_events--;
-      }
 
+        int fd = fds[i].fd;
+        int slot = find_slot_by_fd(fd);
+        ssize_t bytes_read = read(fd, &clientStates[slot].buffer, sizeof(clientStates[slot].buffer));
 
-      for (int i = 1; i <= nfds && n_events > 0; i++) {
-        if (fds[i].revents & POLLIN) {
-          n_events--;
-
-          int fd = fds[i].fd;
-          int slot = find_slot_by_fd(fd);
-          ssize_t bytes_read = read(fd, &clientStates[slot].buffer, sizeof(clientStates[i].buffer));
-
-          if (bytes_read <= 0) {
-            close(fd);
-            if (slot == -1) {
-              printf("Tried to close fd that does not exist?\n");
-            } else {
-              clientStates[slot].fd = -1;
-              clientStates[slot].state = STATE_DISCONNECTED;
-              printf("Client disconnected or error\n");
-              nfds--;
-            }
+        if (bytes_read <= 0) {
+          close(fd);
+          if (slot == -1) {
+            printf("Tried to close fd that does not exist?\n");
           } else {
-            printf("Received data from client: %s\n", clientStates[slot].buffer); 
+            clientStates[slot].fd = -1;
+            clientStates[slot].state = STATE_DISCONNECTED;
+            printf("Client disconnected or error\n");
+            nfds--;
           }
+        } else {
+          printf("Received data from client: %s\n", clientStates[slot].buffer); 
         }
       }
     }
