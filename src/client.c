@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
 
     serverInfo.sin_family = AF_INET;
     serverInfo.sin_addr.s_addr = 0;
-    serverInfo.sin_port = htons(5555);
+    serverInfo.sin_port = htons(8080);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd == -1) {

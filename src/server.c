@@ -2,86 +2,164 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <string.h>
+#include <poll.h>
+#include <stdlib.h>
+#include <arpa/inet.h>
+
+#define MAX_CLIENTS 256
+#define PORT 8080
+#define BUFF_SIZE 4096
 
 typedef enum {
-   PROTO_HELLO,
-} proto_type_e;
+  STATE_NEW,
+  STATE_CONNECTED,
+  STATE_DISCONNECTED
+} state_e;
 
 typedef struct {
-   proto_type_e type;
-   unsigned short len;
-} proto_hdr_t;
+  int fd;
+  state_e state;
+  char buffer[BUFF_SIZE];
+} clientstate_t;
 
-void handle_client(int fd) {
-    char buf[4096] = {0};
-    proto_hdr_t *hdr = (proto_hdr_t*) buf;
+clientstate_t clientStates[MAX_CLIENTS];
 
-    hdr->type = htonl(PROTO_HELLO);
-    hdr->len = sizeof(int);
+void init_clients() {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    clientStates[i].fd = -1;
+    clientStates[i].state = STATE_NEW;
+    memset(&clientStates[i].buffer, '\0', BUFF_SIZE); 
+  }
+}
 
-    int reallen = hdr->len;
-    hdr->len = htons(hdr->len);
+int find_free_slot() {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clientStates[i].fd == -1) {
+      return i;
+    }
+  }
 
-    int *data = (int*)&hdr[1];
-    *data = htonl(1);
+  return -1;
+}
 
-    write(fd, hdr, sizeof(proto_hdr_t) + reallen);
+int find_slot_by_fd(int fd) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clientStates[i].fd == fd) {
+      return i;
+    }
+  }
+
+  return -1;
 }
 
 int main(int argc, char *argv[]) {
-    struct sockaddr_in serverInfo = {0};
-    struct sockaddr_in clientInfo = {0};
-    socklen_t clientSize = 0;
+  int listen_fd, conn_fd, freeSlot;
+  struct sockaddr_in server_addr, client_addr;
+  socklen_t client_len = sizeof(struct sockaddr_in);
 
-    serverInfo.sin_family = AF_INET;
-    serverInfo.sin_addr.s_addr = 0;
-    serverInfo.sin_port = htons(5555);
+  struct pollfd fds[MAX_CLIENTS + 1];
+  int nfds = 1;
+  int opt = 1;
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == -1) {
-       perror("socket");
-       return -1;
-    }
-    printf("%d\n", fd);
+  init_clients();
 
-    //bind ... asign the address
-    //
-    // 0: success / -1: error
-    //
-    //struct sockaddr_in {
-    //    sa_family_t     sin_family;     /* AF_INET */
-    //    in_port_t       sin_port;       /* Port number */
-    //    struct in_addr  sin_addr;       /* IPv4 address */
-    //};
-    //
-    // sys/socket.h
-    // int bind(int sckfd, const struct sockaddr *addr, socklen_t addrlen);
-    if (bind(fd, (struct sockaddr*) &serverInfo, sizeof(struct sockaddr_in)) == -1) {
-        perror("bind");
-        close(fd);
-        return -1;
-    }
+  if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    perror("socket");
+    exit(EXIT_FAILURE);
+  }
 
-    //listen
-    if (listen(fd, 0) == -1) {
-        perror("listen");
-        close(fd);
-        return -1;
-    }
+  if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+    perror("setsockopt");
+    exit(EXIT_FAILURE);  
+  }
 
-    while(1) {
-        //accept ... receive connections
-        //int accept(int sockfd, struct sockaddr *_Nullable restrict addr, socklen_t *_Nullable restrict addrlen);
-        int cfd = accept(fd, (struct sockaddr*) &clientInfo, &clientSize);
-        if (cfd == -1) {
-            perror("accept");
-            close(fd);
-            return -1;
+  memset(&server_addr, 0, sizeof(struct sockaddr_in));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(PORT);
+
+  if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_in)) == -1) {
+    perror("bind");
+    exit(EXIT_FAILURE);
+  }
+
+  if (listen(listen_fd, 10) == -1) {
+    perror("listen");
+    exit(EXIT_FAILURE);
+  }
+
+  printf("Server listening on port %d\n", PORT);
+
+  memset(fds, 0, sizeof(fds));
+  fds[0].fd = listen_fd;
+  fds[0].events = POLLIN;
+  nfds = 1;
+
+  while(1) {
+    int ii = 1;
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+      if (clientStates[i].fd != -1) {
+        fds[ii].fd = clientStates[i].fd;
+        fds[ii].events = POLLIN;
+        ii++; 
+      }
+
+      int n_events = poll(fds, nfds, -1); //no_timeout
+      if (n_events == -1) {
+        perror("poll");
+        exit(EXIT_FAILURE);
+      }
+
+      if (fds[0].revents & POLLIN) {
+        if ((conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len)) == -1) {
+          perror("accept");
+          continue;
         }
 
-        handle_client(cfd);
-        close(cfd);
+        printf("New connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+
+        freeSlot = find_free_slot();
+        if (freeSlot == -1) {
+          printf("Server full: closing new connection\n");
+          close(conn_fd);
+        } else { 
+          clientStates[freeSlot].fd = conn_fd;
+          clientStates[freeSlot].state = STATE_CONNECTED;
+          nfds++;
+          printf("Slot %d has fd %d\n", freeSlot, clientStates[freeSlot].fd);
+        }
+
+        n_events--;
+      }
+
+
+      for (int i = 1; i <= nfds && n_events > 0; i++) {
+        if (fds[i].revents & POLLIN) {
+          n_events--;
+
+          int fd = fds[i].fd;
+          int slot = find_slot_by_fd(fd);
+          ssize_t bytes_read = read(fd, &clientStates[slot].buffer, sizeof(clientStates[i].buffer));
+
+          if (bytes_read <= 0) {
+            close(fd);
+            if (slot == -1) {
+              printf("Tried to close fd that does not exist?\n");
+            } else {
+              clientStates[slot].fd = -1;
+              clientStates[slot].state = STATE_DISCONNECTED;
+              printf("Client disconnected or error\n");
+              nfds--;
+            }
+          } else {
+            printf("Received data from client: %s\n", clientStates[slot].buffer); 
+          }
+        }
+      }
     }
-    close(fd);
-    return 0;
+  }
+
+  return 0;
 }
